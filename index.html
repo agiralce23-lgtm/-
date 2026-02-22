@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Camera + Processed Preview</title>
+  <title>Camera + Processed + Auto ROI (Rectangle Frame)</title>
   <style>
     :root { color-scheme: light dark; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -19,10 +19,11 @@
     video, canvas { width:100%; height:auto; display:block; background:#000; }
     .hint { opacity:.8; font-size:12px; line-height:1.4; padding: 8px 14px 0; }
     .err  { color:#d33; white-space:pre-wrap; font-size:12px; padding: 6px 14px 0; }
-    .tiny { font-size:12px; opacity:.8; }
+    .tiny { font-size:12px; opacity:.85; }
     .slider { display:flex; align-items:center; gap:8px; }
-    .slider label { min-width: 84px; }
+    .slider label { min-width: 86px; }
     .slider input[type="range"] { width: 220px; }
+    .pill { padding: 2px 8px; border: 1px solid rgba(127,127,127,.4); border-radius: 999px; }
   </style>
 </head>
 <body>
@@ -36,12 +37,41 @@
           <select id="selDevice"></select>
         </label>
 
-        <label>処理:
+        <label>表示:
           <select id="selMode">
             <option value="gray">グレースケール</option>
             <option value="thresh">二値化</option>
-            <option value="edges">エッジ</option>
+            <option value="edges" selected>エッジ</option>
           </select>
+        </label>
+
+        <span class="slider">
+          <label for="rngProcW">処理解像度</label>
+          <input id="rngProcW" type="range" min="320" max="960" step="10" value="640">
+          <span class="tiny" id="lblProcW">640</span>
+        </span>
+
+        <span class="slider">
+          <label for="rngEdge">エッジ閾値</label>
+          <input id="rngEdge" type="range" min="0" max="255" value="70">
+          <span class="tiny" id="lblEdge">70</span>
+        </span>
+
+        <span class="slider">
+          <label for="rngLine">線の強さ</label>
+          <input id="rngLine" type="range" min="10" max="95" value="60">
+          <span class="tiny" id="lblLine">0.60</span>
+        </span>
+
+        <span class="slider">
+          <label for="rngSmooth">平滑化</label>
+          <input id="rngSmooth" type="range" min="0" max="100" value="25">
+          <span class="tiny" id="lblSmooth">0.25</span>
+        </span>
+
+        <label>
+          <input type="checkbox" id="chkAutoThresh" checked>
+          自動しきい値(Otsu)
         </label>
 
         <span class="slider">
@@ -51,30 +81,17 @@
         </span>
 
         <label>
-          <input type="checkbox" id="chkAutoThresh" checked>
-          自動しきい値(Otsu)
-        </label>
-
-        <label>
           <input type="checkbox" id="chkMirror" checked>
           ミラー
         </label>
 
-        <label>処理解像度:
-          <select id="selProcW">
-            <option value="480">480</option>
-            <option value="640" selected>640</option>
-            <option value="800">800</option>
-            <option value="960">960</option>
-          </select>
-        </label>
-
+        <span class="tiny pill" id="roiText">ROI: -</span>
         <span class="tiny" id="status">未開始</span>
       </div>
 
       <div class="hint">
-        まず「下に処理した画像が出る」土台。ここから ROI自動（枠検出→切り出し）を追加していく。<br>
-        ※カメラは “https” か “localhost” で開くのが確実（file:// 直開きだと失敗しがち）。
+        下段に処理画像を常時表示しつつ、四角枠（フレーム）を推定してROIを赤枠表示します。<br>
+        ※カメラは “https” か “localhost” で開くのが確実（file:// 直開きは失敗しがち）。
       </div>
       <div class="err" id="err"></div>
     </div>
@@ -83,16 +100,23 @@
   <main class="wrap">
     <div class="stack">
       <section class="panel">
-        <h2>撮影画面</h2>
+        <h2>撮影画面（上）</h2>
         <div class="content">
           <video id="video" playsinline autoplay muted></video>
         </div>
       </section>
 
       <section class="panel">
-        <h2>処理後（下段プレビュー）</h2>
+        <h2>処理後（下）＋ 自動ROI（赤枠）</h2>
         <div class="content">
           <canvas id="processed"></canvas>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>ROI切り出し（確認用）</h2>
+        <div class="content">
+          <canvas id="roi"></canvas>
         </div>
       </section>
     </div>
@@ -103,6 +127,9 @@
     const outCanvas = document.getElementById('processed');
     const outCtx = outCanvas.getContext('2d', { willReadFrequently: true });
 
+    const roiCanvas = document.getElementById('roi');
+    const roiCtx = roiCanvas.getContext('2d', { willReadFrequently: true });
+
     // offscreen for processing
     const procCanvas = document.createElement('canvas');
     const procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
@@ -111,17 +138,35 @@
     const btnStop  = document.getElementById('btnStop');
     const selDevice = document.getElementById('selDevice');
     const selMode   = document.getElementById('selMode');
+
+    const rngProcW  = document.getElementById('rngProcW');
+    const lblProcW  = document.getElementById('lblProcW');
+
+    const rngEdge   = document.getElementById('rngEdge');
+    const lblEdge   = document.getElementById('lblEdge');
+
+    const rngLine   = document.getElementById('rngLine');
+    const lblLine   = document.getElementById('lblLine');
+
+    const rngSmooth = document.getElementById('rngSmooth');
+    const lblSmooth = document.getElementById('lblSmooth');
+
+    const chkAutoThresh = document.getElementById('chkAutoThresh');
     const rngThresh = document.getElementById('rngThresh');
     const lblThresh = document.getElementById('lblThresh');
-    const chkAutoThresh = document.getElementById('chkAutoThresh');
-    const chkMirror = document.getElementById('chkMirror');
-    const selProcW = document.getElementById('selProcW');
 
+    const chkMirror = document.getElementById('chkMirror');
+
+    const roiText = document.getElementById('roiText');
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
 
     let stream = null;
     let rafId = 0;
+
+    // current ROI (smoothed)
+    let roi = null; // {x,y,w,h} in processing canvas coords
+    let roiConfidence = 0; // 0..1
 
     function setStatus(t){ statusEl.textContent = t; }
     function setError(e){ errEl.textContent = e ? String(e) : ''; }
@@ -130,14 +175,23 @@
       const on = chkMirror.checked;
       video.style.transform = on ? 'scaleX(-1)' : 'none';
       outCanvas.style.transform = on ? 'scaleX(-1)' : 'none';
+      roiCanvas.style.transform = on ? 'scaleX(-1)' : 'none';
     }
     chkMirror.addEventListener('change', applyMirror);
     applyMirror();
 
-    rngThresh.addEventListener('input', () => {
-      lblThresh.textContent = rngThresh.value;
-      chkAutoThresh.checked = false;
-    });
+    function bindSlider(sl, lab, fmt = (v)=>v) {
+      const update = () => lab.textContent = fmt(sl.value);
+      sl.addEventListener('input', update);
+      update();
+    }
+    bindSlider(rngProcW, lblProcW, v => v);
+    bindSlider(rngEdge,  lblEdge,  v => v);
+    bindSlider(rngLine,  lblLine,  v => (parseInt(v,10)/100).toFixed(2));
+    bindSlider(rngSmooth,lblSmooth,v => (parseInt(v,10)/100).toFixed(2));
+    bindSlider(rngThresh,lblThresh,v => v);
+
+    rngThresh.addEventListener('input', () => { chkAutoThresh.checked = false; });
 
     async function listDevices() {
       selDevice.innerHTML = '';
@@ -165,9 +219,8 @@
       btnStart.disabled = false;
     }
 
-    // Otsu threshold
+    // Otsu threshold (gray: Uint8ClampedArray length w*h)
     function otsuThreshold(gray) {
-      // gray: Uint8ClampedArray (length = w*h)
       const hist = new Uint32Array(256);
       for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
 
@@ -175,8 +228,7 @@
       let sum = 0;
       for (let t = 0; t < 256; t++) sum += t * hist[t];
 
-      let sumB = 0;
-      let wB = 0;
+      let sumB = 0, wB = 0;
       let varMax = -1;
       let threshold = 128;
 
@@ -199,15 +251,98 @@
       return threshold;
     }
 
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    function lerp(a,b,t){ return a + (b-a)*t; }
+
+    // detect rectangle-like frame from binary edge mask by row/col projection
+    function detectFrameFromEdges(edgeMask, w, h) {
+      // edgeMask: Uint8Array (0 or 1), length w*h
+      const rowSum = new Uint32Array(h);
+      const colSum = new Uint32Array(w);
+
+      for (let y = 0; y < h; y++) {
+        let s = 0;
+        const base = y * w;
+        for (let x = 0; x < w; x++) {
+          const v = edgeMask[base + x];
+          s += v;
+          colSum[x] += v;
+        }
+        rowSum[y] = s;
+      }
+
+      // find max row/col strengths
+      let maxRow = 0, maxCol = 0;
+      for (let y = 0; y < h; y++) if (rowSum[y] > maxRow) maxRow = rowSum[y];
+      for (let x = 0; x < w; x++) if (colSum[x] > maxCol) maxCol = colSum[x];
+
+      // If not strong enough, fail
+      if (maxRow < w * 0.08 || maxCol < h * 0.08) return null;
+
+      const ratio = parseInt(rngLine.value, 10) / 100; // 0.10..0.95
+      const thrRow = Math.max(3, Math.floor(maxRow * ratio));
+      const thrCol = Math.max(3, Math.floor(maxCol * ratio));
+
+      let top = -1, bottom = -1, left = -1, right = -1;
+
+      // find top
+      for (let y = 0; y < h; y++) {
+        if (rowSum[y] >= thrRow) { top = y; break; }
+      }
+      // find bottom
+      for (let y = h - 1; y >= 0; y--) {
+        if (rowSum[y] >= thrRow) { bottom = y; break; }
+      }
+      // left
+      for (let x = 0; x < w; x++) {
+        if (colSum[x] >= thrCol) { left = x; break; }
+      }
+      // right
+      for (let x = w - 1; x >= 0; x--) {
+        if (colSum[x] >= thrCol) { right = x; break; }
+      }
+
+      if (top < 0 || bottom < 0 || left < 0 || right < 0) return null;
+
+      // expand a little (edge line thickness)
+      const pad = 2;
+      top = clamp(top - pad, 0, h - 1);
+      bottom = clamp(bottom + pad, 0, h - 1);
+      left = clamp(left - pad, 0, w - 1);
+      right = clamp(right + pad, 0, w - 1);
+
+      const rw = right - left + 1;
+      const rh = bottom - top + 1;
+
+      // sanity checks (avoid whole-screen or tiny picks)
+      if (rw < w * 0.18 || rw > w * 0.98) return null;
+      if (rh < h * 0.10 || rh > h * 0.98) return null;
+
+      // confidence: how strong the chosen borders are vs max
+      const confRow = Math.min(rowSum[top] / maxRow, rowSum[bottom] / maxRow);
+      const confCol = Math.min(colSum[left] / maxCol, colSum[right] / maxCol);
+      const conf = Math.max(0, Math.min(1, (confRow + confCol) / 2));
+
+      return { x: left, y: top, w: rw, h: rh, conf };
+    }
+
+    function fallbackCenterROI(w, h) {
+      // a reasonable default until detection locks
+      const rw = Math.round(w * 0.55);
+      const rh = Math.round(h * 0.22);
+      const x = Math.round((w - rw) / 2);
+      const y = Math.round((h - rh) / 2);
+      return { x, y, w: rw, h: rh, conf: 0 };
+    }
+
     function renderLoop() {
       const vw = video.videoWidth | 0;
       const vh = video.videoHeight | 0;
       if (vw > 0 && vh > 0) {
-        // processing resolution
-        const targetW = parseInt(selProcW.value, 10) || 640;
+        const targetW = parseInt(rngProcW.value, 10) || 640;
         const scale = targetW / vw;
-        const pw = Math.max(160, Math.round(vw * scale));
-        const ph = Math.max(120, Math.round(vh * scale));
+        const pw = Math.max(200, Math.round(vw * scale));
+        const ph = Math.max(150, Math.round(vh * scale));
 
         if (procCanvas.width !== pw || procCanvas.height !== ph) {
           procCanvas.width = pw;
@@ -218,71 +353,119 @@
           outCanvas.height = ph;
         }
 
-        // draw video -> proc
+        // Draw frame to offscreen
         procCtx.drawImage(video, 0, 0, pw, ph);
         const img = procCtx.getImageData(0, 0, pw, ph);
         const data = img.data;
 
-        // grayscale buffer
+        // Grayscale
         const gray = new Uint8ClampedArray(pw * ph);
         for (let i = 0, p = 0; i < data.length; i += 4, p++) {
           const r = data[i], g = data[i+1], b = data[i+2];
           gray[p] = (0.299*r + 0.587*g + 0.114*b) | 0;
         }
 
-        const mode = selMode.value;
-
-        if (mode === 'gray') {
-          // write grayscale to RGBA
-          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-            const y = gray[p];
-            data[i] = data[i+1] = data[i+2] = y;
-          }
-          outCtx.putImageData(img, 0, 0);
+        // Threshold (for display mode or later use)
+        let t = parseInt(rngThresh.value, 10) | 0;
+        if (chkAutoThresh.checked) {
+          t = otsuThreshold(gray);
+          rngThresh.value = t;
+          lblThresh.textContent = t;
         }
 
-        else if (mode === 'thresh') {
-          let t = parseInt(rngThresh.value, 10) | 0;
-          if (chkAutoThresh.checked) {
-            t = otsuThreshold(gray);
-            lblThresh.textContent = t;
-            rngThresh.value = t;
+        const mode = selMode.value;
+
+        // Edge mask (binary) for ROI detection
+        const edgeT = parseInt(rngEdge.value, 10) | 0;
+        const edgeMask = new Uint8Array(pw * ph);
+
+        // Sobel on gray → edgeMask
+        // (skip border pixels)
+        for (let y = 1; y < ph - 1; y++) {
+          const y0 = (y - 1) * pw;
+          const y1 = y * pw;
+          const y2 = (y + 1) * pw;
+          for (let x = 1; x < pw - 1; x++) {
+            const p00 = gray[y0 + (x - 1)], p01 = gray[y0 + x],     p02 = gray[y0 + (x + 1)];
+            const p10 = gray[y1 + (x - 1)], /*p11*/                   p12 = gray[y1 + (x + 1)];
+            const p20 = gray[y2 + (x - 1)], p21 = gray[y2 + x],     p22 = gray[y2 + (x + 1)];
+
+            const gx = (-1*p00) + (1*p02) + (-2*p10) + (2*p12) + (-1*p20) + (1*p22);
+            const gy = ( 1*p00) + (2*p01) + (1*p02) + (-1*p20) + (-2*p21) + (-1*p22);
+            let mag = Math.abs(gx) + Math.abs(gy);
+            if (mag > 255) mag = 255;
+            edgeMask[y1 + x] = (mag >= edgeT) ? 1 : 0;
           }
+        }
+
+        // Display image (gray / thresh / edges)
+        if (mode === 'gray') {
+          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const yv = gray[p];
+            data[i] = data[i+1] = data[i+2] = yv;
+          }
+          outCtx.putImageData(img, 0, 0);
+        } else if (mode === 'thresh') {
           for (let i = 0, p = 0; i < data.length; i += 4, p++) {
             const v = gray[p] >= t ? 255 : 0;
             data[i] = data[i+1] = data[i+2] = v;
           }
           outCtx.putImageData(img, 0, 0);
-        }
-
-        else if (mode === 'edges') {
-          // simple Sobel on gray (ignore borders)
-          // output: 0..255
-          const out = new Uint8ClampedArray(pw * ph);
-          const w = pw, h = ph;
-          for (let y = 1; y < h - 1; y++) {
-            const y0 = (y - 1) * w;
-            const y1 = y * w;
-            const y2 = (y + 1) * w;
-            for (let x = 1; x < w - 1; x++) {
-              const p00 = gray[y0 + (x - 1)], p01 = gray[y0 + x],     p02 = gray[y0 + (x + 1)];
-              const p10 = gray[y1 + (x - 1)], p11 = gray[y1 + x],     p12 = gray[y1 + (x + 1)];
-              const p20 = gray[y2 + (x - 1)], p21 = gray[y2 + x],     p22 = gray[y2 + (x + 1)];
-
-              const gx = (-1*p00) + (1*p02) + (-2*p10) + (2*p12) + (-1*p20) + (1*p22);
-              const gy = ( 1*p00) + (2*p01) + (1*p02) + (-1*p20) + (-2*p21) + (-1*p22);
-
-              let mag = Math.abs(gx) + Math.abs(gy); // fast magnitude
-              if (mag > 255) mag = 255;
-              out[y1 + x] = mag;
-            }
-          }
+        } else { // edges
           for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-            const v = out[p];
+            const v = edgeMask[p] ? 255 : 0;
             data[i] = data[i+1] = data[i+2] = v;
           }
           outCtx.putImageData(img, 0, 0);
         }
+
+        // --- Auto ROI detect ---
+        let detected = detectFrameFromEdges(edgeMask, pw, ph);
+
+        // fallback if nothing detected
+        if (!detected) detected = fallbackCenterROI(pw, ph);
+
+        // smooth ROI to avoid jitter
+        const smooth = parseInt(rngSmooth.value, 10) / 100; // 0..1
+        if (!roi) {
+          roi = { x: detected.x, y: detected.y, w: detected.w, h: detected.h };
+          roiConfidence = detected.conf || 0;
+        } else {
+          roi.x = Math.round(lerp(roi.x, detected.x, smooth));
+          roi.y = Math.round(lerp(roi.y, detected.y, smooth));
+          roi.w = Math.round(lerp(roi.w, detected.w, smooth));
+          roi.h = Math.round(lerp(roi.h, detected.h, smooth));
+          roiConfidence = lerp(roiConfidence, (detected.conf || 0), smooth);
+        }
+
+        // clamp ROI within bounds
+        roi.x = clamp(roi.x, 0, pw - 1);
+        roi.y = clamp(roi.y, 0, ph - 1);
+        roi.w = clamp(roi.w, 10, pw - roi.x);
+        roi.h = clamp(roi.h, 10, ph - roi.y);
+
+        // draw ROI rectangle on output
+        outCtx.save();
+        outCtx.lineWidth = Math.max(2, Math.round(pw / 320));
+        outCtx.strokeStyle = 'red';
+        outCtx.strokeRect(roi.x + 0.5, roi.y + 0.5, roi.w, roi.h);
+        outCtx.restore();
+
+        // ROI text
+        roiText.textContent = `ROI: x=${roi.x}, y=${roi.y}, w=${roi.w}, h=${roi.h}  conf=${roiConfidence.toFixed(2)}`;
+
+        // crop ROI preview
+        const rw = Math.max(1, roi.w);
+        const rh = Math.max(1, roi.h);
+        const maxPreviewW = 900;
+        const scaleRoi = Math.min(1, maxPreviewW / rw);
+        roiCanvas.width = Math.round(rw * scaleRoi);
+        roiCanvas.height = Math.round(rh * scaleRoi);
+
+        // draw from procCanvas (original frame) to ROI preview
+        roiCtx.imageSmoothingEnabled = false;
+        roiCtx.clearRect(0,0,roiCanvas.width, roiCanvas.height);
+        roiCtx.drawImage(procCanvas, roi.x, roi.y, rw, rh, 0, 0, roiCanvas.width, roiCanvas.height);
       }
 
       rafId = requestAnimationFrame(renderLoop);
