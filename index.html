@@ -3,23 +3,26 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Camera + Grayscale Preview</title>
+  <title>Camera + Processed Preview</title>
   <style>
     :root { color-scheme: light dark; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    header { padding: 12px 14px; border-bottom: 1px solid rgba(127,127,127,.35); }
-    .wrap { max-width: 900px; margin: 0 auto; padding: 12px 14px 20px; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    button, select, label { font-size: 14px; }
-    button { padding: 8px 12px; cursor: pointer; }
-    .stack { display: grid; gap: 12px; margin-top: 12px; }
-    .panel { border: 1px solid rgba(127,127,127,.35); border-radius: 10px; overflow: hidden; }
-    .panel h2 { margin: 0; padding: 10px 12px; font-size: 14px; border-bottom: 1px solid rgba(127,127,127,.25); }
-    .content { padding: 10px 12px; }
-    video, canvas { width: 100%; height: auto; display: block; background: #000; }
-    .hint { opacity: .8; font-size: 12px; line-height: 1.4; }
-    .err { color: #d33; white-space: pre-wrap; font-size: 12px; }
-    .tiny { font-size: 12px; opacity: .8; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { padding:12px 14px; border-bottom:1px solid rgba(127,127,127,.35); }
+    .wrap { max-width: 980px; margin:0 auto; padding: 0 14px 18px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    button, select, input { font-size:14px; }
+    button { padding:8px 12px; cursor:pointer; }
+    .stack { display:grid; gap:12px; margin-top:12px; }
+    .panel { border:1px solid rgba(127,127,127,.35); border-radius:10px; overflow:hidden; }
+    .panel h2 { margin:0; padding:10px 12px; font-size:14px; border-bottom:1px solid rgba(127,127,127,.25); }
+    .content { padding:10px 12px; }
+    video, canvas { width:100%; height:auto; display:block; background:#000; }
+    .hint { opacity:.8; font-size:12px; line-height:1.4; padding: 8px 14px 0; }
+    .err  { color:#d33; white-space:pre-wrap; font-size:12px; padding: 6px 14px 0; }
+    .tiny { font-size:12px; opacity:.8; }
+    .slider { display:flex; align-items:center; gap:8px; }
+    .slider label { min-width: 84px; }
+    .slider input[type="range"] { width: 220px; }
   </style>
 </head>
 <body>
@@ -29,21 +32,49 @@
         <button id="btnStart">カメラ開始</button>
         <button id="btnStop" disabled>停止</button>
 
-        <label>
-          カメラ:
+        <label>カメラ:
           <select id="selDevice"></select>
+        </label>
+
+        <label>処理:
+          <select id="selMode">
+            <option value="gray">グレースケール</option>
+            <option value="thresh">二値化</option>
+            <option value="edges">エッジ</option>
+          </select>
+        </label>
+
+        <span class="slider">
+          <label for="rngThresh">しきい値</label>
+          <input id="rngThresh" type="range" min="0" max="255" value="140">
+          <span class="tiny" id="lblThresh">140</span>
+        </span>
+
+        <label>
+          <input type="checkbox" id="chkAutoThresh" checked>
+          自動しきい値(Otsu)
         </label>
 
         <label>
           <input type="checkbox" id="chkMirror" checked>
-          ミラー表示
+          ミラー
+        </label>
+
+        <label>処理解像度:
+          <select id="selProcW">
+            <option value="480">480</option>
+            <option value="640" selected>640</option>
+            <option value="800">800</option>
+            <option value="960">960</option>
+          </select>
         </label>
 
         <span class="tiny" id="status">未開始</span>
       </div>
+
       <div class="hint">
-        上：撮影（video）／ 下：グレースケール（canvas）<br>
-        ※動かない場合は「localhost で開く」必要があります（下の説明参照）。
+        まず「下に処理した画像が出る」土台。ここから ROI自動（枠検出→切り出し）を追加していく。<br>
+        ※カメラは “https” か “localhost” で開くのが確実（file:// 直開きだと失敗しがち）。
       </div>
       <div class="err" id="err"></div>
     </div>
@@ -59,9 +90,9 @@
       </section>
 
       <section class="panel">
-        <h2>グレースケール</h2>
+        <h2>処理後（下段プレビュー）</h2>
         <div class="content">
-          <canvas id="gray"></canvas>
+          <canvas id="processed"></canvas>
         </div>
       </section>
     </div>
@@ -69,31 +100,44 @@
 
   <script>
     const video = document.getElementById('video');
-    const grayCanvas = document.getElementById('gray');
-    const grayCtx = grayCanvas.getContext('2d', { willReadFrequently: true });
+    const outCanvas = document.getElementById('processed');
+    const outCtx = outCanvas.getContext('2d', { willReadFrequently: true });
+
+    // offscreen for processing
+    const procCanvas = document.createElement('canvas');
+    const procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
 
     const btnStart = document.getElementById('btnStart');
     const btnStop  = document.getElementById('btnStop');
     const selDevice = document.getElementById('selDevice');
+    const selMode   = document.getElementById('selMode');
+    const rngThresh = document.getElementById('rngThresh');
+    const lblThresh = document.getElementById('lblThresh');
+    const chkAutoThresh = document.getElementById('chkAutoThresh');
     const chkMirror = document.getElementById('chkMirror');
-    const statusEl  = document.getElementById('status');
-    const errEl     = document.getElementById('err');
+    const selProcW = document.getElementById('selProcW');
+
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
 
     let stream = null;
     let rafId = 0;
 
     function setStatus(t){ statusEl.textContent = t; }
-    function setError(e){
-      errEl.textContent = e ? String(e) : '';
-    }
+    function setError(e){ errEl.textContent = e ? String(e) : ''; }
 
     function applyMirror() {
       const on = chkMirror.checked;
       video.style.transform = on ? 'scaleX(-1)' : 'none';
-      grayCanvas.style.transform = on ? 'scaleX(-1)' : 'none';
+      outCanvas.style.transform = on ? 'scaleX(-1)' : 'none';
     }
     chkMirror.addEventListener('change', applyMirror);
     applyMirror();
+
+    rngThresh.addEventListener('input', () => {
+      lblThresh.textContent = rngThresh.value;
+      chkAutoThresh.checked = false;
+    });
 
     async function listDevices() {
       selDevice.innerHTML = '';
@@ -121,30 +165,126 @@
       btnStart.disabled = false;
     }
 
-    function renderLoop() {
-      const w = video.videoWidth | 0;
-      const h = video.videoHeight | 0;
-      if (w > 0 && h > 0) {
-        if (grayCanvas.width !== w || grayCanvas.height !== h) {
-          grayCanvas.width = w;
-          grayCanvas.height = h;
-        }
+    // Otsu threshold
+    function otsuThreshold(gray) {
+      // gray: Uint8ClampedArray (length = w*h)
+      const hist = new Uint32Array(256);
+      for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
 
-        // video → canvas
-        grayCtx.drawImage(video, 0, 0, w, h);
+      const total = gray.length;
+      let sum = 0;
+      for (let t = 0; t < 256; t++) sum += t * hist[t];
 
-        // grayscale
-        const img = grayCtx.getImageData(0, 0, w, h);
-        const data = img.data;
-        for (let i = 0; i < data.length; i += 4) {
-          const r = data[i], g = data[i+1], b = data[i+2];
-          // 輝度（標準的な加重平均）
-          const y = (0.299*r + 0.587*g + 0.114*b) | 0;
-          data[i] = data[i+1] = data[i+2] = y;
-          // data[i+3] は alpha
+      let sumB = 0;
+      let wB = 0;
+      let varMax = -1;
+      let threshold = 128;
+
+      for (let t = 0; t < 256; t++) {
+        wB += hist[t];
+        if (wB === 0) continue;
+        const wF = total - wB;
+        if (wF === 0) break;
+
+        sumB += t * hist[t];
+        const mB = sumB / wB;
+        const mF = (sum - sumB) / wF;
+
+        const varBetween = wB * wF * (mB - mF) * (mB - mF);
+        if (varBetween > varMax) {
+          varMax = varBetween;
+          threshold = t;
         }
-        grayCtx.putImageData(img, 0, 0);
       }
+      return threshold;
+    }
+
+    function renderLoop() {
+      const vw = video.videoWidth | 0;
+      const vh = video.videoHeight | 0;
+      if (vw > 0 && vh > 0) {
+        // processing resolution
+        const targetW = parseInt(selProcW.value, 10) || 640;
+        const scale = targetW / vw;
+        const pw = Math.max(160, Math.round(vw * scale));
+        const ph = Math.max(120, Math.round(vh * scale));
+
+        if (procCanvas.width !== pw || procCanvas.height !== ph) {
+          procCanvas.width = pw;
+          procCanvas.height = ph;
+        }
+        if (outCanvas.width !== pw || outCanvas.height !== ph) {
+          outCanvas.width = pw;
+          outCanvas.height = ph;
+        }
+
+        // draw video -> proc
+        procCtx.drawImage(video, 0, 0, pw, ph);
+        const img = procCtx.getImageData(0, 0, pw, ph);
+        const data = img.data;
+
+        // grayscale buffer
+        const gray = new Uint8ClampedArray(pw * ph);
+        for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+          const r = data[i], g = data[i+1], b = data[i+2];
+          gray[p] = (0.299*r + 0.587*g + 0.114*b) | 0;
+        }
+
+        const mode = selMode.value;
+
+        if (mode === 'gray') {
+          // write grayscale to RGBA
+          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const y = gray[p];
+            data[i] = data[i+1] = data[i+2] = y;
+          }
+          outCtx.putImageData(img, 0, 0);
+        }
+
+        else if (mode === 'thresh') {
+          let t = parseInt(rngThresh.value, 10) | 0;
+          if (chkAutoThresh.checked) {
+            t = otsuThreshold(gray);
+            lblThresh.textContent = t;
+            rngThresh.value = t;
+          }
+          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const v = gray[p] >= t ? 255 : 0;
+            data[i] = data[i+1] = data[i+2] = v;
+          }
+          outCtx.putImageData(img, 0, 0);
+        }
+
+        else if (mode === 'edges') {
+          // simple Sobel on gray (ignore borders)
+          // output: 0..255
+          const out = new Uint8ClampedArray(pw * ph);
+          const w = pw, h = ph;
+          for (let y = 1; y < h - 1; y++) {
+            const y0 = (y - 1) * w;
+            const y1 = y * w;
+            const y2 = (y + 1) * w;
+            for (let x = 1; x < w - 1; x++) {
+              const p00 = gray[y0 + (x - 1)], p01 = gray[y0 + x],     p02 = gray[y0 + (x + 1)];
+              const p10 = gray[y1 + (x - 1)], p11 = gray[y1 + x],     p12 = gray[y1 + (x + 1)];
+              const p20 = gray[y2 + (x - 1)], p21 = gray[y2 + x],     p22 = gray[y2 + (x + 1)];
+
+              const gx = (-1*p00) + (1*p02) + (-2*p10) + (2*p12) + (-1*p20) + (1*p22);
+              const gy = ( 1*p00) + (2*p01) + (1*p02) + (-1*p20) + (-2*p21) + (-1*p22);
+
+              let mag = Math.abs(gx) + Math.abs(gy); // fast magnitude
+              if (mag > 255) mag = 255;
+              out[y1 + x] = mag;
+            }
+          }
+          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const v = out[p];
+            data[i] = data[i+1] = data[i+2] = v;
+          }
+          outCtx.putImageData(img, 0, 0);
+        }
+      }
+
       rafId = requestAnimationFrame(renderLoop);
     }
 
@@ -153,7 +293,7 @@
       stopStream();
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('このブラウザは getUserMedia に対応していません。Chrome/Edge の新しめで試してください。');
+        throw new Error('getUserMedia 非対応。Chrome/Edge の新しめで試してください。');
       }
 
       const constraints = {
@@ -178,7 +318,7 @@
       btnStop.disabled = false;
       btnStart.disabled = true;
 
-      // 権限取得後に device label が取れるので再取得
+      // after permission, labels become available
       await listDevices();
       if (deviceId) selDevice.value = deviceId;
 
@@ -199,7 +339,7 @@
     btnStop.addEventListener('click', () => stopStream());
 
     selDevice.addEventListener('change', async () => {
-      if (!stream) return; // 未開始なら選ぶだけ
+      if (!stream) return;
       try {
         setStatus('切替中...');
         await startCamera(selDevice.value);
@@ -210,14 +350,9 @@
       }
     });
 
-    // 初期化：デバイス一覧だけ先に試す（権限前は label が空でもOK）
+    // init
     (async () => {
-      try {
-        await listDevices();
-      } catch (e) {
-        // enumerateDevices は https/localhost でも権限前に通ることが多いけど環境差あり
-        setError(e);
-      }
+      try { await listDevices(); } catch (e) { /* ignore */ }
     })();
   </script>
 </body>
